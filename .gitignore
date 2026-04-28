@@ -1,0 +1,6 @@
+.env
+venv/
+*.pyc
+tools/__pycache__/
+models/__pycache__/
+requirements.txt
