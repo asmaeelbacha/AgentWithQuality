@@ -5,28 +5,13 @@ from typing import Generator
 from models.dynamic_record import DynamicRecord
 
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Nettoyage basique avant envoi aux agents.
-    """
     original_count = len(df)
-
-    # 1. Supprime les lignes entièrement vides
     df = df.dropna(how="all")
-
-    # 2. Supprime les doublons exacts
     df = df.drop_duplicates()
-
-    # 3. Réinitialise l'index
     df = df.reset_index(drop=True)
-
-    # 4. Supprime les espaces dans les colonnes texte
     for col in df.select_dtypes(include="object").columns:
         df[col] = df[col].str.strip()
-
-    # 5. Remplace les chaînes vides par None
     df = df.replace("", None)
-
-    # 6. ← NOUVEAU : Tronque les colonnes à texte long
     for col in df.select_dtypes(include="object").columns:
         try:
             avg_len = df[col].dropna().apply(len).mean()
@@ -38,33 +23,41 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
                       f"(moyenne {avg_len:.0f} chars)")
         except Exception:
             continue
-
     cleaned_count = len(df)
     removed = original_count - cleaned_count
-
     if removed > 0:
         print(f"🧹 Nettoyage : {removed} lignes supprimées "
               f"({original_count} → {cleaned_count})")
     else:
         print(f"🧹 Nettoyage : données déjà propres "
               f"({cleaned_count} lignes)")
-
     return df
 
 
 def load_batches(
     filepath: str,
     batch_size: int = 10,
-    max_records: int = None,
+    max_records: int = 10,
 ) -> Generator[list[DynamicRecord], None, None]:
-    """
-    Lit n'importe quel fichier Excel/CSV,
-    nettoie les données et yielde des batches.
-    """
+
     if filepath.endswith(".xlsx"):
         df = pd.read_excel(filepath)
     else:
-        df = pd.read_csv(filepath)
+        for encoding in ["utf-8", "latin-1", "cp1252", "iso-8859-1"]:
+            try:
+                df = pd.read_csv(
+                    filepath,
+                    encoding=encoding,
+                    on_bad_lines='skip',
+                    sep=None,
+                    engine='python'
+                )
+                print(f"✅ Encodage détecté : {encoding}")
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise ValueError(f"Encodage inconnu : {filepath}")
 
     if max_records:
         df = df.head(max_records)

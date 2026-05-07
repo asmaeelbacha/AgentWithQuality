@@ -1,66 +1,77 @@
 # agents/agent1.py
 import os
 import time
+import requests
+from datetime import datetime
 from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, HumanMessage
 from models.dynamic_record import DynamicRecord
-from tools.search import get_search_tool
-from agents._react import extract_json, run_react_loop
+from agents._react import extract_json
 
 load_dotenv()
 
-llm = ChatGroq(
-    model=os.getenv("AGENT1_MODEL", "openai/gpt-oss-120b"),
-    api_key=os.getenv("GROQ_API_KEY"),
-    max_tokens=4000,
-    temperature=0,
-)
-
-search_tool = get_search_tool(max_results=2)
-llm_with_tools = llm.bind_tools([search_tool])
+MODEL = os.getenv("AGENT1_MODEL", "anthropic/claude-sonnet-4-6")
+API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 SYSTEM_PROMPT = """Tu es un Expert en Audit de Données Sémantiques.
+Ton rôle est de vérifier la LOGIQUE et la COHÉRENCE des données.
+Python gère déjà les types et formats — toi tu analyses le SENS.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RÈGLE FONDAMENTALE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tu analyses CHAQUE LIGNE INDÉPENDAMMENT.
+Tu n'as AUCUNE connaissance des autres lignes.
+Tu ne fais JAMAIS de comparaison entre lignes.
+Tu utilises UNIQUEMENT les données fournies.
+Tu n'utilises PAS tes connaissances externes
+sur les modèles de voitures ou le marché.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 TES 4 VÉRIFICATIONS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. VALEUR DANS LA BONNE COLONNE :
-   La valeur correspond-elle sémantiquement
-   au nom de sa colonne ?
+   ❌ colonne "fuel" contient "30.000 km"
+   ❌ colonne "price" contient "rouge"
+   ❌ colonne "make" contient "En stock"
 
 2. POLLUTION DE SCRAPING :
-   Le champ contient-il du texte
-   qui ne lui appartient pas ?
+   ❌ colonne "model" contient "Livraison gratuite"
+   ❌ colonne "version" contient "Cliquez ici"
 
 3. ENTITÉS INCOMPATIBLES :
-   Les champs décrivant la même entité
-   sont-ils cohérents entre eux ?
+   ❌ make = "BMW" model = "Clio"
+   ❌ fuel = "Électrique" version = "TDI diesel"
 
 4. CONTEXTE MÉTIER IRRÉALISTE :
-   Les valeurs sont-elles réalistes
-   dans leur contexte ?
+   ❌ Seats = 20 pour une voiture
+   ❌ Price = 0 ou négatif
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTIL DE RECHERCHE DISPONIBLE
+INTERDICTIONS ABSOLUES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Tu as accès à un outil de recherche web.
-Utilise-le UNIQUEMENT pour vérifier check 3 (entités incompatibles)
-quand tu as un doute sur la cohérence entre champs.
-
-Exemples de recherches utiles :
-→ "BMW Clio car model" → cette combinaison marque/modèle existe ?
-→ "FIAT Grande Panda electric version" → ce modèle existe en électrique ?
-→ "Polestar 2 body type hatchback SUV" → quel est le type de carrosserie ?
-
-N'utilise PAS l'outil pour :
-→ Vérifier des formats numériques
-→ Vérifier des dates
-→ Des incohérences évidentes (ex: "Grand" dans une colonne Power)
+❌ Ne compare PAS les lignes entre elles
+❌ Ne juge PAS les dates
+   → La date d'aujourd'hui est fournie
+   → Toute date passée ou récente = valide
+❌ Ne juge PAS les valeurs NULL/NaN
+❌ Ne juge PAS les formats numériques
+   → "30.000 km" = format européen valide
+   → "100.000 kr" = format norvégien valide
+   → "5.0" = entier pandas valide
+❌ Ne juge PAS les unités et majuscules
+   → "kwh" et "kWh" = pareil → valide
+❌ Ne juge PAS si un modèle existe
+   → Bénéfice du doute → valide
+❌ Ne juge PAS si une version existe
+   → "LRDM", "RS", "Evolve" → valide
+❌ Ne juge PAS le type de carrosserie
+❌ Ne signale PAS [long_text] comme erreur
+❌ Ne juge PAS les prix
+   → Sauf si price = 0 ou négatif
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FORMAT DE RÉPONSE FINAL (JSON UNIQUEMENT)
+FORMAT DE RÉPONSE (JSON UNIQUEMENT)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {
   "results": [
@@ -68,145 +79,103 @@ FORMAT DE RÉPONSE FINAL (JSON UNIQUEMENT)
       "row_index": 0,
       "is_valid": boolean,
       "score": float (0.0 à 1.0),
-      "reasoning": "Explique ton raisonnement basé UNIQUEMENT sur cette ligne",
+      "reasoning": "Raisonnement basé UNIQUEMENT sur cette ligne",
       "errors": [
         {
           "field": "nom_colonne",
-          "message": "Description précise de l'incohérence détectée",
+          "message": "Description précise",
           "severity": "critical|high|medium|low",
           "type": "wrong_column|scraping_pollution|incompatible_entity|logical_contradiction|unrealistic_value"
         }
       ],
-      "summary": "Bilan de la ligne en une phrase"
+      "summary": "Bilan en une phrase"
     }
   ]
 }
 
 SCORE :
 1.0 = aucune incohérence
-0.8 = incohérences low
-0.6 = incohérences medium
-0.4 = incohérences high
-0.2 = incohérences critical
+0.8 = low | 0.6 = medium
+0.4 = high | 0.2 = critical
 is_valid = true si score >= 0.6
 
 Réponds UNIQUEMENT en JSON."""
 
 
-def needs_search(records: list[DynamicRecord]) -> bool:
-    """
-    Détermine si le batch nécessite une recherche web.
-    Recherche SEULEMENT si aucune erreur évidente visible.
-    """
-    for record in records:
-        data = record.data
-
-        # Erreur évidente dans Power → pas besoin de search
-        power = str(data.get("Power", "") or "").strip()
-        if power and not power.replace(".", "").replace(",", "").isdigit():
-            return False
-
-        # Erreur évidente dans Fuel → pas besoin de search
-        fuel = str(data.get("Fuel", "") or "").strip().lower()
-        known_fuels = {"electric", "diesel", "petrol", "hybrid",
-                       "benzin", "gasolina", "elétrico", "híbrido",
-                       "normal", "mild hybrid"}
-        if fuel and fuel not in known_fuels:
-            return False
-
-        # Seats irréaliste → pas besoin de search
-        seats = data.get("Seats", None)
-        try:
-            if seats and float(str(seats)) > 10:
-                return False
-        except (ValueError, TypeError):
-            pass
-
-    return True  # Pas d'erreur évidente → search utile
+def call_llm(messages: list, max_tokens: int = 4000) -> str:
+    """Appel direct OpenRouter — pas de LangChain."""
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": MODEL,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": 0
+        },
+        timeout=60
+    )
+    response.raise_for_status()
+    return response.json()["choices"][0]["message"]["content"]
 
 
 def analyze_batch(
     records: list[DynamicRecord],
     max_retries: int = 3,
 ) -> list[dict]:
-    """
-    Analyse un batch avec search conditionnel.
-    Search activé seulement si pas d'erreur évidente.
-    """
-    batch_text = ""
-    for record in records:
-        batch_text += f"\n--- Ligne {record.row_index} ---\n"
-        batch_text += record.to_prompt_text()
-        batch_text += "\n"
+    """Analyse 1 ligne à la fois — isolation parfaite."""
+    all_results = []
 
-    user_prompt = f"""Analyse la cohérence de ces lignes :
+    for record in records:
+        batch_text = f"\n--- Ligne {record.row_index} ---\n"
+        batch_text += record.to_prompt_text()
+        today = datetime.now().strftime("%d/%m/%Y")
+
+        user_prompt = f"""Date d'aujourd'hui : {today}
+
+Analyse la cohérence de cette ligne :
 
 {batch_text}
 
-Retourne un objet JSON avec une clé "results" contenant la liste des analyses."""
+Retourne un objet JSON avec une clé "results"."""
 
-    # Détermine si search nécessaire
-    use_search = needs_search(records)
+        for attempt in range(max_retries):
+            try:
+                messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt}
+                ]
+                content = call_llm(messages)
+                
+                results = extract_json(content)
+            
+                for r in results:
+                    r["row_index"] = record.row_index
+                    r["agent"] = "Agent1_Sonnet46"
+                all_results.extend(results)
+                time.sleep(0.5)
+                break
 
-    for attempt in range(max_retries):
-        try:
-            messages = [
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=user_prompt),
-            ]
+            except Exception as e:
+                error_msg = str(e)
+                if "429" in error_msg:
+                    wait = 10 * (attempt + 1)
+                    print(f"⏳ Agent1 rate limit — attente {wait}s")
+                    time.sleep(wait)
+                    continue
+                all_results.append({
+                    "agent": "Agent1_Sonnet46",
+                    "row_index": record.row_index,
+                    "is_valid": False,
+                    "score": 0.0,
+                    "errors": [{"field": "api",
+                               "message": error_msg[:100],
+                               "severity": "critical"}],
+                    "summary": "Erreur API"
+                })
+                break
 
-            if use_search:
-                # Avec search tool
-                content = run_react_loop(
-                    llm_with_tools,
-                    search_tool,
-                    messages,
-                    max_iterations=3
-                )
-            else:
-                # Sans search tool — appel direct
-                response = llm.invoke(messages)
-                content = response.content
-
-            results = extract_json(content)
-            for r in results:
-                r["agent"] = "Agent1_GPT120B"
-            return results
-
-        except Exception as e:
-            error_msg = str(e)
-
-            # Si 413 → retry SANS search
-            if "413" in error_msg and use_search:
-                print(f"⚠️  Agent1 413 → retry sans search")
-                use_search = False
-                continue
-
-            if "429" in error_msg:
-                wait = 10 * (attempt + 1)
-                print(f"⏳ Agent1 rate limit — attente {wait}s "
-                      f"(tentative {attempt+1}/{max_retries})")
-                time.sleep(wait)
-                continue
-
-            return [{
-                "agent": "Agent1_GPT120B",
-                "row_index": r.row_index,
-                "is_valid": False,
-                "score": 0.0,
-                "errors": [{"field": "api",
-                           "message": error_msg[:100],
-                           "severity": "critical"}],
-                "summary": "Erreur API"
-            } for r in records]
-
-    return [{
-        "agent": "Agent1_GPT120B",
-        "row_index": r.row_index,
-        "is_valid": False,
-        "score": 0.0,
-        "errors": [{"field": "api",
-                   "message": "Max retries dépassé",
-                   "severity": "critical"}],
-        "summary": "Rate limit persistant"
-    } for r in records]
+    return all_results
